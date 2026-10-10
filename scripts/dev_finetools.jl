@@ -1,6 +1,9 @@
 using Pkg
 
-const ROOT = get(ENV, "FINETOOLS_DEV_ROOT", "/Users/gcastellazzi/Dropbox/GitHub")
+# The checkouts normally sit beside this repository. Override with
+# FINETOOLS_DEV_ROOT when they live elsewhere.
+const ROOT = get(ENV, "FINETOOLS_DEV_ROOT",
+                 normpath(joinpath(@__DIR__, "..", "..")))
 
 Pkg.activate(joinpath(@__DIR__, ".."))
 

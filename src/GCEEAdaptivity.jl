@@ -61,6 +61,7 @@ export Recovery, fit, physical_coefficients, element_centers, element_recovery
 export gram, contraction, diagnostics
 export zz_indicator, residual_indicator
 export target_inverse, relocation_objective, relocate_nodes, recovered_at
+export jacobian_ratio, jacobian_cap
 export recovery_cases, run_recovery_study, relocation_experiment
 export run_relocation_study, run_part_study
 export material, strain, elastic_probe, navier_residual, probe_values, probe_coefficients

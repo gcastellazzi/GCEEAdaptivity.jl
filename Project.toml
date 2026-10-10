@@ -1,7 +1,7 @@
 name = "GCEEAdaptivity"
 uuid = "df280338-9e60-43d0-bbb2-cc1e76a4d00e"
 version = "0.1.0"
-authors = ["Giuseppe Castellazzi"]
+authors = ["Giovanni Castellazzi <info@aico-compositi.it>"]
 
 [deps]
 FinEtools = "91bb5406-6c9a-523d-811d-0644c4229550"

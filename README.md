@@ -43,8 +43,8 @@ reproduced. The numbers in the note stay the reference for those runs.
 
 ## Setup
 
-From this directory, with the FinEtools checkout at
-`/Users/gcastellazzi/Dropbox/GitHub/FinEtools.jl`:
+From this directory. `dev_finetools.jl` looks for the FinEtools checkouts
+beside this repository; set `FINETOOLS_DEV_ROOT` if they live elsewhere:
 
 ```bash
 julia --project=. scripts/dev_finetools.jl

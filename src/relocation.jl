@@ -5,6 +5,9 @@
 # is a function of the node positions alone and its gradient is exact under
 # forward-mode AD. Every trial mesh is tested for a positive Jacobian before
 # the energy is evaluated, so no invalid mesh is ever an accepted iterate.
+# A GCEE step is then followed by a short shape relaxation. The relaxation
+# squares cells without changing the area the GCEE step chose. A step that
+# still leaves the corner-Jacobian ratio above the cap is undone.
 
 """Value and physical gradient of the frozen recovered cubic of element `e` at `X`."""
 function recovered_at(rec::Recovery, e::Integer, X1, X2)
@@ -53,9 +56,10 @@ function target_inverse(m::Mesh, rec::Recovery, mode::AbstractString)
     return out
 end
 
-"""Smallest corner Jacobian determinant of a bilinear mesh with the given points."""
-function _corner_minimum(Dc::Array{Float64,3}, cells::AbstractMatrix, P::AbstractMatrix)
-    m = Inf
+"""Smallest and largest corner Jacobian determinants of a bilinear mesh."""
+function _corner_extent(Dc::Array{Float64,3}, cells::AbstractMatrix, P::AbstractMatrix)
+    lo = Inf
+    hi = -Inf
     for e in axes(cells, 1), q in 1:4
         J11 = J12 = J21 = J22 = 0.0
         for a in axes(cells, 2)
@@ -65,10 +69,33 @@ function _corner_minimum(Dc::Array{Float64,3}, cells::AbstractMatrix, P::Abstrac
             J21 += Dc[q, a, 1] * py
             J22 += Dc[q, a, 2] * py
         end
-        m = min(m, J11 * J22 - J12 * J21)
+        d = J11 * J22 - J12 * J21
+        lo = min(lo, d)
+        hi = max(hi, d)
     end
-    return m
+    return lo, hi
 end
+
+"""Smallest corner Jacobian determinant of a bilinear mesh with the given points."""
+function _corner_minimum(Dc::Array{Float64,3}, cells::AbstractMatrix, P::AbstractMatrix)
+    lo, _ = _corner_extent(Dc, cells, P)
+    return lo
+end
+
+"""
+    jacobian_ratio(m)
+
+Largest corner Jacobian determinant divided by the smallest. A non-positive
+corner returns `Inf`.
+"""
+function jacobian_ratio(m::Mesh)
+    d = corner_determinants(m)
+    lo = minimum(d)
+    return lo > 0 ? maximum(d) / lo : Inf
+end
+
+"""Cap `growth * jacobian_ratio(m)`, anchored on the mesh passed in."""
+jacobian_cap(m::Mesh; growth::Real=4) = growth * jacobian_ratio(m)
 
 """
     relocation_objective(m, rec, mode; order=7)
@@ -151,14 +178,57 @@ function relocation_objective(m::Mesh, rec::Recovery, mode::AbstractString="gcee
 end
 
 """
-    relocate_nodes(m, rec; mode="gcee", iterations=25, order=7, trust=0.3)
+One Armijo step inside the trust box around the frozen mesh. `step_scale`
+shortens the proposed step. A trial with a corner determinant below `floor`,
+or a Jacobian ratio above `ratio_limit`, is rejected.
+"""
+function _line_search(z, g, objective, value, detmin, ratiofn;
+        n, trust, floor, step_scale=1.0, ratio_limit=Inf)
+    direction = -g .* ((0.12 / n) * step_scale) ./ max(maximum(abs, g), 1e-30)
+    box = trust / n
+    candidate = clamp.(z .+ direction, -box, box)
+    direction = candidate .- z
+    slope = dot(g, direction)
+    slope >= -1e-18 && return z, value, 0, false
+    α = 1.0
+    rejected = 0
+    for _ in 1:28
+        trial = z .+ α .* direction
+        if detmin(trial) > floor && ratiofn(trial) <= ratio_limit
+            v = objective(trial)
+            if isfinite(v) && v <= value + 1e-4 * α * slope
+                return trial, v, rejected, true
+            end
+        end
+        rejected += 1
+        α *= 0.5
+    end
+    return z, value, rejected, false
+end
+
+"""
+    relocate_nodes(m, rec; mode="gcee", iterations=25, order=7, trust=0.3,
+                   ratio_cap=Inf, ratio_anchor=NaN, relax_steps=5)
 
 Scaled steepest descent with a trust box and an Armijo line search. Returns the
 relocated mesh, the iteration history and the number of rejected trials.
+
+For `mode="gcee"` and a finite `ratio_cap`, every accepted step that leaves the
+corner-Jacobian ratio above `ratio_anchor` is followed by at most `relax_steps`
+shape steps on the uniform-square target. Each of those steps is a quarter of
+a GCEE step and may not raise the ratio, so the nodes move: the GCEE step
+chooses the area and the shape step squares the cells. The sub-steps stop
+once the ratio is back to the anchor. A step that is still above `ratio_cap`
+afterwards is undone, and the descent stops. Pass the anchor and the cap from
+the mesh the budget is measured on. An unset anchor uses the mesh at the
+start of this call.
 """
 function relocate_nodes(m::Mesh, rec::Recovery; mode::AbstractString="gcee",
-        iterations::Integer=25, order::Integer=7, trust::Real=0.3)
+        iterations::Integer=25, order::Integer=7, trust::Real=0.3,
+        ratio_cap::Real=Inf, ratio_anchor::Real=NaN, relax_steps::Integer=5)
     objective, build = relocation_objective(m, rec, mode; order=order)
+    relax = mode == "gcee" && isfinite(ratio_cap)
+    shape = relax ? relocation_objective(m, rec, "tmop_uniform"; order=order)[1] : nothing
     nfree = count(.!m.boundary)
     z = zeros(2 * nfree)
     Dc = shapes("Q4", CORN)[2]
@@ -167,36 +237,39 @@ function relocate_nodes(m::Mesh, rec::Recovery; mode::AbstractString="gcee",
                          Tuple{Int,Float64,Float64,Float64}}[]
     rejected = 0
     detmin(zz) = _corner_minimum(Dc, m.cells, build(zz))
+    ratiofn(zz) = begin
+        lo, hi = _corner_extent(Dc, m.cells, build(zz))
+        return lo > 0 ? hi / lo : Inf
+    end
     detmin(z) > floor || error("initial mesh violates the chosen Jacobian floor")
+    anchor = isnan(ratio_anchor) ? ratiofn(z) : ratio_anchor
     value = objective(z)
     for k in 0:(iterations - 1)
         g = ForwardDiff.gradient(objective, z)
         push!(history, (iteration=k, J=value, det_min=detmin(z),
                         gradient_norm=norm(g)))
         maximum(abs, g) < 1e-12 && break
-        direction = -g .* (0.12 / m.n) ./ max(maximum(abs, g), 1e-30)
-        # Project the step into a box around this frozen-field mesh.
-        candidate = clamp.(z .+ direction, -trust / m.n, trust / m.n)
-        direction = candidate .- z
-        slope = dot(g, direction)
-        slope >= -1e-18 && break
-        α = 1.0
-        accepted = false
-        for _ in 1:28
-            trial = z .+ α .* direction
-            if detmin(trial) > floor
-                v = objective(trial)
-                if isfinite(v) && v <= value + 1e-4 * α * slope
-                    z = trial
-                    value = v
-                    accepted = true
-                    break
-                end
-            end
-            rejected += 1
-            α *= 0.5
-        end
+        z_before, value_before = copy(z), value
+        z, value, nrej, accepted = _line_search(z, g, objective, value, detmin, ratiofn;
+                                                 n=m.n, trust=trust, floor=floor)
+        rejected += nrej
         accepted || break
+        if relax && ratiofn(z) > anchor
+            for _ in 1:relax_steps
+                ratiofn(z) <= anchor && break
+                gs = ForwardDiff.gradient(shape, z)
+                z, _, nrej, ok = _line_search(z, gs, shape, shape(z), detmin, ratiofn;
+                                              n=m.n, trust=trust, floor=floor,
+                                              step_scale=0.25, ratio_limit=ratiofn(z))
+                rejected += nrej
+                ok || break
+            end
+            value = objective(z)
+        end
+        if relax && ratiofn(z) > ratio_cap
+            z, value = z_before, value_before
+            break
+        end
     end
     final = objective(z)
     push!(history, (iteration=length(history), J=final, det_min=detmin(z),

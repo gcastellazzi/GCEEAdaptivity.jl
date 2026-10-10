@@ -361,12 +361,14 @@ function main()
         a == "--paper" && (paper = ARGS[i + 1])
         a == "--quick" && (quick = true)
     end
+    control_only = any(a == "--only" && ARGS[i + 1] == "control" for (i, a) in enumerate(ARGS[1:end - 1]))
     paper === nothing && error("pass --paper /path/to/PaperA")
     out = joinpath(paper, "generated")
     mkpath(out)
     levels = quick ? (4, 8) : (4, 8, 16)
 
     # --- Experiments 1-3 ----------------------------------------------------
+    if !control_only
     println("recovery study ...")
     rec = run_recovery_study(; levels = levels, verbose = false)
     @printf("  %d cases\n", length(rec))
@@ -424,16 +426,23 @@ function main()
     savepair(joinpath(out, "recovery_meshes"),
              plot(outlines...; layout = (2, 3), size = (980, 640)))
 
+    end
+
     # --- Experiments 4-5 ----------------------------------------------------
     println("relocation study ...")
     rel, frozen, relmesh, relcells = run_relocation_study(; verbose = false)
+    # The solid GCEE curve is the relocation without the shape sub-step.
+    rel_free, frozen_free, relmesh_free, _ = run_relocation_study(;
+        modes = ("gcee",), ratio_growth = Inf, verbose = false)
+    rel_report = vcat(rel_free, [r for r in rel if r["mode"] != "gcee"])
+    frozen_report = vcat(frozen_free, [a for a in frozen if a["mode"] != "gcee"])
     rows = String[]
     table_rows = Vector{String}[]
-    for r in rel
+    for r in rel_report
         r["cycle"] == 4 || continue
-        f = first(a for a in frozen if a["n"] == r["n"] && a["field"] == r["field"] &&
+        f = first(a for a in frozen_report if a["n"] == r["n"] && a["field"] == r["field"] &&
                   a["mode"] == r["mode"] && a["cycle"] == 0)
-        c1 = first(a for a in rel if a["n"] == r["n"] && a["field"] == r["field"] &&
+        c1 = first(a for a in rel_report if a["n"] == r["n"] && a["field"] == r["field"] &&
                    a["mode"] == r["mode"] && a["cycle"] == 1)
         push!(table_rows, [string(r["n"]), r["field"], SHORT[r["mode"]],
                            @sprintf("%.3f", f["J_after"] / f["J_before"]),
@@ -450,7 +459,8 @@ function main()
     for n in (8, 12), fieldname in ("layer", "bump")
         panel += 1
         for mode in ("gcee", "tmop_uniform", "tmop_hessian")
-            rr = sort([r for r in rel if r["n"] == n && r["field"] == fieldname &&
+            source = mode == "gcee" ? rel_free : rel
+            rr = sort([r for r in source if r["n"] == n && r["field"] == fieldname &&
                        r["mode"] == mode], by = r -> r["cycle"])
             plot!(errs, [r["cycle"] for r in rr], [r["E_h_ratio"] for r in rr];
                   subplot = panel, marker = :circle, markersize = 3,
@@ -458,18 +468,48 @@ function main()
                   xlabel = "cycle", ylabel = "\$E_h/E_h^0\$",
                   title = "$fieldname, n = $n", legend = panel == 1 ? :topright : false)
         end
+        relaxed = sort([r for r in rel if r["n"] == n && r["field"] == fieldname &&
+                        r["mode"] == "gcee"], by = r -> r["cycle"])
+        plot!(errs, [r["cycle"] for r in relaxed], [r["E_h_ratio"] for r in relaxed];
+              subplot = panel, marker = :diamond, markersize = 3, linestyle = :dash,
+              color = C_GCEE, label = panel == 1 ? "GCEE, relaxed" : "")
     end
     savepair(joinpath(out, "relocation_errors"), errs)
 
-    key = "layer_gcee_8"
-    seq = relmesh[key]
-    panels = [mesh_outline(seq[k], relcells[key];
-                           title = k == 1 ? "initial" : "cycle $(k-1)",
-                           lims = ((-0.02, 1.02), (-0.02, 1.02)))
-              for k in (1, 2, 3, length(seq))]
-    savepair(joinpath(out, "relocation_meshes"), plot(panels...; layout = (1, 4), size = (1050, 280)))
+    # Layer at n = 12, the case named in the caption. The field panel is a fine
+    # regular mesh so the colour is the feature; the other three share its scale.
+    u_layer = manufactured("layer")
+    fieldmesh = structured_mesh(40; kind = "Q4", family = "regular")
+    square = ((-0.02, 1.02), (-0.02, 1.02))
+    reloc_meshes = (
+        fieldmesh.points,
+        relmesh["layer_gcee_12"][1],
+        relmesh["layer_tmop_uniform_12"][end],
+        relmesh["layer_gcee_12"][end],
+    )
+    reloc_conns = (fieldmesh.cells, relcells["layer_gcee_12"],
+                   relcells["layer_tmop_uniform_12"], relcells["layer_gcee_12"])
+    layer_ratio = first(r["det_ratio"] for r in rel if r["n"] == 12 &&
+                        r["field"] == "layer" && r["mode"] == "gcee" && r["cycle"] == 4)
+    reloc_titles = ("manufactured field", "initial", "TMOP-U", "GCEE, relaxed")
+    reloc_ratios = (nothing, nothing, nothing, layer_ratio)
+    reloc_nodal = [[u_layer(pts[i, 1], pts[i, 2]) for i in axes(pts, 1)] for pts in reloc_meshes]
+    reloc_paint = [cell_means(conn, val) for (conn, val) in zip(reloc_conns, reloc_nodal)]
+    rvmin, rvmax = minimum(minimum.(reloc_paint)), maximum(maximum.(reloc_paint))
+    reloc_panels = [mesh_field(pts, conn, val;
+                               title = ratio === nothing ? field_heading(title, paint) :
+                                       field_heading(title, paint) *
+                                       @sprintf("    ratio = %.1f", ratio),
+                               lims = square, cmap = :YlOrRd, vmin = rvmin, vmax = rvmax,
+                               linewidth = pts === fieldmesh.points ? 0.0 : 0.35)
+                    for (pts, conn, val, paint, title, ratio) in
+                        zip(reloc_meshes, reloc_conns, reloc_nodal, reloc_paint,
+                            reloc_titles, reloc_ratios)]
+    savepair(joinpath(out, "relocation_meshes"),
+             plot(reloc_panels...; layout = (2, 2), size = (920, 860)))
 
     # --- Displacement-only elastic control ----------------------------------
+    if !control_only
     println("elastic patch ...")
     elastic_rows = Vector{String}[]
     response = Dict{String,Vector{NTuple{4,Float64}}}()
@@ -562,9 +602,12 @@ function main()
     end
     savepair(joinpath(out, "critical_modes"), crit)
 
+    end
+
     # --- Experiment 6: the curved beam ---------------------------------------
     println("curved beam ...")
-    part, partmesh, partcells = run_part_study(; verbose = true)
+    part, partmesh, partcells = run_part_study(; ratio_growth = Inf, verbose = true)
+    part_relax, partmesh_relax, _ = run_part_study(; modes = ("gcee",), verbose = false)
     write_table(joinpath(out, "part_table.tex"),
         ["Objective", "Cycle", "\$|u-u_h|_{H^1}\$", "GCEE rec.", "ZZ", "Residual",
          "\$\\det\$ ratio"],
@@ -583,17 +626,23 @@ function main()
         fieldmesh.points,
         partmesh["gcee"][1],
         partmesh["tmop"][end],
-        partmesh["gcee"][end],
+        partmesh_relax["gcee"][end],
     )
     conns = (fieldmesh.cells, partcells, partcells, partcells)
-    titles = ("manufactured field", "initial", "TMOP", "GCEE")
+    titles = ("manufactured field", "initial", "TMOP", "GCEE, relaxed")
     nodal = [[u(pts[i, 1], pts[i, 2]) for i in axes(pts, 1)] for pts in meshes]
     painted = [cell_means(conn, val) for (conn, val) in zip(conns, nodal)]
     vmin, vmax = minimum(minimum.(painted)), maximum(maximum.(painted))
-    panels = [mesh_field(pts, conn, val; title = field_heading(title, paint), lims = lims,
-                         cmap = :YlOrRd, vmin = vmin, vmax = vmax,
+    beam_relaxed_ratio = last([r["det_ratio"] for r in part_relax if r["mode"] == "gcee"])
+    beam_ratios = (nothing, nothing, nothing, beam_relaxed_ratio)
+    panels = [mesh_field(pts, conn, val;
+                         title = ratio === nothing ? field_heading(title, paint) :
+                                 field_heading(title, paint) *
+                                 @sprintf("    ratio = %.1f", ratio),
+                         lims = lims, cmap = :YlOrRd, vmin = vmin, vmax = vmax,
                          linewidth = pts === fieldmesh.points ? 0.0 : 0.35)
-              for (pts, conn, val, paint, title) in zip(meshes, conns, nodal, painted, titles)]
+              for (pts, conn, val, paint, title, ratio) in
+                  zip(meshes, conns, nodal, painted, titles, beam_ratios)]
     savepair(joinpath(out, "part_meshes"),
              plot(panels...; layout = (2, 2), size = (920, 860)))
 
@@ -605,6 +654,10 @@ function main()
               label = SHORT[mode], xlabel = "cycle", ylabel = "\$|u-u_h|_{H^1}\$",
               title = "true error", legend = :topleft)
     end
+    relaxed_beam = [r for r in part_relax if r["mode"] == "gcee"]
+    plot!(hist, [r["cycle"] for r in relaxed_beam], [r["E_h"] for r in relaxed_beam];
+          subplot = 1, marker = :diamond, markersize = 3, linestyle = :dash,
+          color = C_GCEE, label = "GCEE, relaxed")
     gg = [r for r in part if r["mode"] == "gcee"]
     for (key, lab, color) in (("E_h", "true error", :black),
                               ("gcee_recovered", "GCEE recovered", C_GCEE),
@@ -617,6 +670,59 @@ function main()
     end
     savepair(joinpath(out, "part_history"), hist)
 
+    control = plot(; layout = (2, 2), size = (860, 560))
+    free_beam = [r for r in part if r["mode"] == "gcee"]
+    tmop_beam = [r for r in part if r["mode"] == "tmop"]
+    for (sp, key, ylab, title) in ((1, "E_h", "\$|u-u_h|_{H^1}\$", "curved beam, error"),
+                                   (2, "det_ratio", "Jacobian ratio", "curved beam, ratio"))
+        for (rows, style, marker, lab, color) in (
+                (free_beam, :solid, :circle, "GCEE", C_GCEE),
+                (relaxed_beam, :dash, :diamond, "GCEE, relaxed", C_GCEE),
+                (tmop_beam, :solid, :square, "TMOP", C_TMOPU))
+            plot!(control, [r["cycle"] for r in rows], [r[key] for r in rows];
+                  subplot = sp, marker = marker, markersize = 3, linestyle = style,
+                  color = color, label = sp == 1 ? lab : "",
+                  xlabel = "cycle", ylabel = ylab, title = title,
+                  legend = sp == 1 ? :topright : false)
+        end
+    end
+    layer_free = sort([r for r in rel_free if r["n"] == 12 && r["field"] == "layer"],
+                      by = r -> r["cycle"])
+    layer_relax = sort([r for r in rel if r["n"] == 12 && r["field"] == "layer" &&
+                        r["mode"] == "gcee"], by = r -> r["cycle"])
+    for (sp, key, ylab, title) in ((3, "E_h_ratio", "\$E_h/E_h^0\$", "layer, n = 12, error"),
+                                   (4, "det_ratio", "Jacobian ratio", "layer, n = 12, ratio"))
+        for (rows, style, marker, lab) in (
+                (layer_free, :solid, :circle, "GCEE"),
+                (layer_relax, :dash, :diamond, "GCEE, relaxed"))
+            plot!(control, [r["cycle"] for r in rows], [r[key] for r in rows];
+                  subplot = sp, marker = marker, markersize = 3, linestyle = style,
+                  color = C_GCEE, label = sp == 3 ? lab : "",
+                  xlabel = "cycle", ylabel = ylab, title = title,
+                  legend = sp == 3 ? :topright : false)
+        end
+    end
+    savepair(joinpath(out, "gcee_control"), control)
+
+    u_beam = manufactured("beam")
+    beam_lims = ((-0.05, 2.05), (-0.05, 2.05))
+    before_pts, after_pts = partmesh["gcee"][end], partmesh_relax["gcee"][end]
+    before_row = free_beam[end]
+    after_row = relaxed_beam[end]
+    beam_nodal = [[u_beam(pts[i, 1], pts[i, 2]) for i in axes(pts, 1)]
+                  for pts in (before_pts, after_pts)]
+    beam_paint = [cell_means(partcells, val) for val in beam_nodal]
+    bmin, bmax = minimum(minimum.(beam_paint)), maximum(maximum.(beam_paint))
+    beam_titles = (
+        @sprintf("GCEE\nu max = %.3e    ratio = %.1f", maximum(beam_paint[1]), before_row["det_ratio"]),
+        @sprintf("GCEE, relaxed\nu max = %.3e    ratio = %.1f", maximum(beam_paint[2]), after_row["det_ratio"]),
+    )
+    beam_panels = [mesh_field(pts, partcells, val; title = title, lims = beam_lims,
+                              cmap = :YlOrRd, vmin = bmin, vmax = bmax)
+                   for (pts, val, title) in zip((before_pts, after_pts), beam_nodal, beam_titles)]
+    savepair(joinpath(out, "part_control_meshes"),
+             plot(beam_panels...; layout = (1, 2), size = (920, 460)))
+
     # --- raw data ------------------------------------------------------------
     open(joinpath(DATA, "part.csv"), "w") do io
         println(io, "mode,cycle,E_h,E_I,relative,gcee_recovered,gcee_oracle,zz,residual_estimator,det_min,det_ratio")
@@ -627,10 +733,12 @@ function main()
                 r["residual_estimator"], r["det_min"], r["det_ratio"])
         end
     end
-    if quick
-        export_shortlist(out; levels = (4, 8), ngeo = 6, iterations = 3, order = 2)
-    else
-        export_shortlist(out)
+    if !control_only
+        if quick
+            export_shortlist(out; levels = (4, 8), ngeo = 6, iterations = 3, order = 2)
+        else
+            export_shortlist(out)
+        end
     end
     println("wrote tables and figures to ", out)
 end

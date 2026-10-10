@@ -178,4 +178,12 @@ end
     @test all(corner_determinants(m2) .> 0)
     # Boundary nodes never move.
     @test m2.points[m.boundary, :] ≈ m.points[m.boundary, :] atol = 1e-14
+    # The shape sub-step keeps the corner-Jacobian ratio inside the cap
+    # anchored on the mesh the descent started from.
+    ρ0 = jacobian_ratio(m)
+    m3, _, _ = relocate_nodes(m, rec; mode="gcee", iterations=6, order=5,
+                              ratio_cap=jacobian_cap(m))
+    @test jacobian_ratio(m3) <= jacobian_cap(m) * (1 + 1e-8)
+    @test m3.points[m.boundary, :] ≈ m.points[m.boundary, :] atol = 1e-14
+    @test ρ0 > 1
 end

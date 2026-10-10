@@ -1,10 +1,10 @@
 # Provenance and methodological decisions
 
-The starting notes are `/Users/gcastellazzi/Dropbox/Papers/2026_a-priori_paper#2/notes_A_recovery_radaptivity.tex`; an unmodified dated copy is archived in `PaperA/archive`. The original remains unchanged.
+The starting notes are the author's working notes for Paper A; an unmodified dated copy is archived in `PaperA/archive`. The original remains unchanged.
 
 The inherited Gram definition and projection construction belong to Paper 1 and Paper B (`../GCEEAlgebra`). This repository evaluates the full residual Gram form by quadrature. It does not regenerate the symbolic channel catalogue or use a truncated small-distortion expansion as an exact finite-distortion formula.
 
-Mesh definitions were checked against these scripts under `/Users/gcastellazzi/Dropbox/Papers/2026_a-priori_error_estimator/scripting`:
+Mesh definitions were checked against the scripting directory of the first paper:
 
 - `03_q8_convergence.py`: alternating and seeded random vertex perturbations, manufactured sin(2x)cosh(y) field.
 - `05_q8_curved_convergence.py`: internal horizontal midside shifts and curved families.
