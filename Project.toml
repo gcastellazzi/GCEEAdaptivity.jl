@@ -1,0 +1,27 @@
+name = "GCEEAdaptivity"
+uuid = "df280338-9e60-43d0-bbb2-cc1e76a4d00e"
+version = "0.1.0"
+authors = ["Giuseppe Castellazzi"]
+
+[deps]
+FinEtools = "91bb5406-6c9a-523d-811d-0644c4229550"
+FinEtoolsDeforLinear = "e9187c00-8bdd-11e9-1e70-7ba8303116a2"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[compat]
+FinEtools = "8"
+FinEtoolsDeforLinear = "3"
+ForwardDiff = "0.10, 1"
+LinearAlgebra = "1"
+Plots = "1"
+Printf = "1"
+julia = "1.11, 1.12"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
