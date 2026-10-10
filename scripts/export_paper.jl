@@ -1,10 +1,13 @@
-# Runs the recovered-indicator study and writes every table and figure that
-# Paper A includes from `generated/`. Replaces the Python prototype.
+# Writes every table and figure that Paper A includes from `generated/`.
+# The recovered-indicator study replaces the Python prototype. The shortlist
+# figures use the same metric, solver and mesh as `scripts/plot_benchmarks.jl`,
+# with the Gram target in place of the published target.
 #
 #   julia --project=. scripts/export_paper.jl --paper /path/to/PaperA
 #   julia --project=. scripts/export_paper.jl --paper /path/to/PaperA --quick
 #
-# `--quick` drops the n = 16 recovery level; the paper tables need the full run.
+# `--quick` drops the n = 16 recovery level and the finer shortlist meshes.
+# The paper tables need the full run.
 
 using GCEEAdaptivity
 using DelimitedFiles
@@ -30,6 +33,7 @@ mkpath(DATA); mkpath(FIG)
 const C_GCEE = RGB(0.659, 0.216, 0.173)      # #a8372c
 const C_TMOPU = RGB(0.141, 0.384, 0.545)     # #24628b
 const C_TMOPH = RGB(0.220, 0.525, 0.357)     # #38865b
+const C_UNIFORM = RGB(0.267, 0.267, 0.267)  # #444444
 const MODE_COLOR = Dict("gcee" => C_GCEE, "tmop_uniform" => C_TMOPU,
                         "tmop_hessian" => C_TMOPH, "tmop" => C_TMOPU)
 const MODE_LABEL = Dict("gcee" => "GCEE", "tmop_uniform" => "TMOP, uniform target",
@@ -65,12 +69,22 @@ function mesh_outline(xyz, conn; title="", lims=nothing, color=:black)
     return p
 end
 
+"""Element means of a nodal field, the values that colour the cells."""
+function cell_means(conn, nodal)
+    return [sum(nodal[conn[e, 1:4]]) / 4 for e in axes(conn, 1)]
+end
+
+"""Two-line title: the panel name, then the plotted quantity and its maximum."""
+function field_heading(name, values)
+    return @sprintf("%s\nu    max = %.3e", name, maximum(values))
+end
+
 """Filled mesh coloured by an element value, with a colour bar."""
-function mesh_field(xyz, conn, nodal; title="", lims=nothing, cmap=:viridis,
-        vmin=minimum(nodal), vmax=maximum(nodal))
+function mesh_field(xyz, conn, nodal; title="", lims=nothing, cmap=:YlOrRd,
+        vmin=minimum(nodal), vmax=maximum(nodal), linewidth=0.35, bar="u")
     p = plot(; aspect_ratio = :equal, legend = false, title = title,
              xlabel = "x", ylabel = "y", size = (420, 400), grid = false,
-             framestyle = :box)
+             framestyle = :box, titlefontsize = 9)
     if lims !== nothing
         plot!(p; xlims = lims[1], ylims = lims[2])
     end
@@ -81,14 +95,262 @@ function mesh_field(xyz, conn, nodal; title="", lims=nothing, cmap=:viridis,
         value = sum(nodal[ids]) / 4
         t = clamp((value - vmin) / span, 0, 1)
         plot!(p, Shape(xyz[ids, 1], xyz[ids, 2]); fillcolor = colors[t],
-              linecolor = :black, linewidth = 0.35, colorbar = false, label = "")
+              linecolor = :black, linewidth = linewidth, colorbar = false, label = "")
     end
     scatter!(p, [NaN, NaN], [NaN, NaN]; marker_z = [vmin, vmax],
-             seriescolor = colors, colorbar = true, markersize = 0, label = "")
+             seriescolor = colors, colorbar = true, colorbar_title = bar,
+             markersize = 0, label = "")
     return p
 end
 
 savepair(path, p) = (savefig(p, path * ".pdf"); savefig(p, path * ".png"); path)
+
+"""Physical image of the four reference edges, so a curved side stays curved."""
+function cell_edges(kind, nodes; samples = 9)
+    t = collect(range(-1.0, 1.0; length = samples))
+    refs = (
+        (t, fill(-1.0, samples)),
+        (fill(1.0, samples), t),
+        (reverse(t), fill(1.0, samples)),
+        (fill(-1.0, samples), reverse(t)),
+    )
+    edges = Matrix{Float64}[]
+    for (ξ, η) in refs
+        N, _, _ = shapes(kind, [ξ η])
+        push!(edges, N * nodes)
+    end
+    return edges
+end
+
+"""Outline of one structured mesh, corners and midside nodes included."""
+function family_outline(m; title = "")
+    p = plot(; aspect_ratio = :equal, legend = false, title = title,
+             xlabel = "x", ylabel = "y", size = (420, 400), grid = false,
+             framestyle = :box, xlims = (-0.04, 1.04), ylims = (-0.04, 1.04))
+    for e in 1:ncells(m)
+        nodes = m.points[m.cells[e, :], :]
+        for edge in cell_edges(m.kind, nodes)
+            plot!(p, edge[:, 1], edge[:, 2]; color = :black, linewidth = 0.45, label = "")
+        end
+    end
+    return p
+end
+
+"""Element colour is the quadrature mean of the TMOP metric."""
+function metric_fill(xyz, conn, values; title = "", lo = minimum(values), hi = maximum(values))
+    hi <= lo && (hi = lo + 1e-14)
+    p = plot(; aspect_ratio = :equal, legend = false, title = title,
+             xlabel = "x", ylabel = "y", size = (460, 430), grid = false,
+             framestyle = :box, titlefontsize = 9,
+             xlims = (-0.02, 1.02), ylims = (-0.02, 1.02))
+    span = hi - lo
+    colors = cgrad(:YlOrRd)
+    for e in axes(conn, 1)
+        ids = conn[e, :]
+        t = clamp((values[e] - lo) / span, 0, 1)
+        plot!(p, Shape(xyz[ids, 1], xyz[ids, 2]); fillcolor = colors[t],
+              linecolor = :black, linewidth = 0.35, colorbar = false, label = "")
+    end
+    scatter!(p, [NaN, NaN], [NaN, NaN]; marker_z = [lo, hi], seriescolor = colors,
+             colorbar = true, colorbar_title = "mu", markersize = 0, label = "")
+    return p
+end
+
+function metric_heading(name, id, functional, values)
+    return @sprintf("%s\nmetric %d    F = %.3e    max = %.3e",
+                    name, id, functional, maximum(values))
+end
+
+"""One published target and the Gram target on the same metric."""
+function target_pair(metric, tmop_target, field; n = 12, iterations = 8, order = 3)
+    patch = unit_square_mesh(n; order = order)
+    gtarget = gcee_target(patch.xyz0, patch, field)
+    xyz_t, hist_t = relocate(patch.xyz0, patch, metric, tmop_target; iterations = iterations)
+    xyz_g, hist_g = relocate(patch.xyz0, patch, metric, gtarget; iterations = iterations)
+    mu_t = element_metrics(xyz_t, patch, metric, tmop_target)
+    mu_g = element_metrics(xyz_g, patch, metric, gtarget)
+    lo = min(minimum(mu_t), minimum(mu_g))
+    hi = max(maximum(mu_t), maximum(mu_g))
+    return (;
+        patch, xyz_t, xyz_g, mu_t, mu_g, lo, hi, metric,
+        f0t = hist_t[1], f1t = hist_t[end], f0g = hist_g[1], f1g = hist_g[end],
+        area_t = minimum_area(xyz_t, patch), area_g = minimum_area(xyz_g, patch),
+    )
+end
+
+function metric_pair_plot(pair, title_t, title_g)
+    return (
+        metric_fill(pair.xyz_t, pair.patch.conn, pair.mu_t;
+            title = metric_heading(title_t, pair.metric, pair.f1t, pair.mu_t),
+            lo = pair.lo, hi = pair.hi),
+        metric_fill(pair.xyz_g, pair.patch.conn, pair.mu_g;
+            title = metric_heading(title_g, pair.metric, pair.f1g, pair.mu_g),
+            lo = pair.lo, hi = pair.hi),
+    )
+end
+
+# Published size ratio admitted by each geometric target, in table order.
+const QUALITY_ROWS = (
+    ("ring-paper", "Annulus, hr \\S4.2", "\$10\\!:\\!1\$"),
+    ("ring-tid9", "Annulus, \\texttt{tid 9}", "\$10\\!:\\!1\$"),
+    ("ring-tid10", "Annulus, \\texttt{tid 10}", "\$10\\!:\\!1\$"),
+    ("band-size", "Band \$W_1\$, IMR \\S6.1", "\$7\\!:\\!1\$"),
+    ("band-shape", "Band \$W_2\$, IMR \\S6.1", "\$3\\!:\\!1\$"),
+    ("band-both", "Band \$W_3\$, IMR \\S6.1", "\$3\\!:\\!1\$"),
+    ("material", "Interface, \\texttt{tid 6}", "\$9\\!:\\!1\$"),
+    ("discrete-size", "Size, \\texttt{tid 5}", "\$9\\!:\\!1\$"),
+)
+
+fmt_mu(v) = v >= 100 ? @sprintf("%.0f", v) : @sprintf("%.2f", v)
+
+"""Convergence, quality and the three metric figures of the shortlist section."""
+function export_shortlist(out; levels = (4, 6, 8, 12), ngeo = 12, iterations = 8, order = 3)
+    println("shortlist ...")
+    fronts = []
+    for α in (20.0, 200.0)
+        tmop = [run_poisson_front(; sharpness = α, n = n, iterations = iterations,
+                                  order = order, driver = :gradient) for n in levels]
+        gcee = [run_poisson_front(; sharpness = α, n = n, iterations = iterations,
+                                  order = order, driver = :gcee) for n in levels]
+        push!(fronts, (tmop, gcee))
+    end
+    shock_t = [run_oblique_shock(; n = n, iterations = iterations, order = order,
+                                 driver = :analytic) for n in levels]
+    shock_g = [run_oblique_shock(; n = n, iterations = iterations, order = order,
+                                 driver = :gcee) for n in levels]
+    sweeps = (
+        ("Circular front, \$\\beta=20\$", "circular front, beta = 20",
+         "convergence_poisson", fronts[1]...),
+        ("Circular front, \$\\beta=200\$", "circular front, beta = 200",
+         "convergence_poisson_sharp", fronts[2]...),
+        ("Oblique shock, \$\\mu_{107}\$", "oblique shock",
+         "convergence_shock", shock_t, shock_g),
+    )
+
+    lines = [raw"\begin{tabular}{llrrrrrr}", raw"\toprule",
+             raw"& & \multicolumn{3}{c}{$\|u-u_h\|_{L^2}$} & \multicolumn{3}{c}{$|u-u_h|_{H^1}$}" * "\\\\",
+             raw"\cmidrule(lr){3-5}\cmidrule(lr){6-8}",
+             raw"Case & $n$ & uniform & TMOP & GCEE & uniform & TMOP & GCEE" * "\\\\",
+             raw"\midrule"]
+    for (k, (label, _, _, tmop, gcee)) in enumerate(sweeps)
+        for (j, (r, g)) in enumerate(zip(tmop, gcee))
+            head = j == 1 ? label : ""
+            push!(lines, @sprintf("%s & %d & %.4f & %.4f & %.4f & %.3f & %.3f & %.3f\\\\",
+                                  head, r.n, r.l2_uniform, r.l2_adapted, g.l2_adapted,
+                                  r.energy_uniform, r.energy_adapted, g.energy_adapted))
+        end
+        k < length(sweeps) && push!(lines, raw"\midrule")
+    end
+    append!(lines, [raw"\bottomrule", raw"\end{tabular}"])
+    write(joinpath(out, "shortlist_table.tex"), join(lines, "\n") * "\n")
+
+    for (_, _, stem, tmop, gcee) in sweeps
+        open(joinpath(DATA, stem * ".csv"), "w") do io
+            println(io, "n,interior_dofs,h,L2_uniform,L2_TMOP,L2_GCEE,energy_uniform,energy_TMOP,energy_GCEE")
+            for (r, g) in zip(tmop, gcee)
+                @printf(io, "%d,%d,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e\n",
+                        r.n, (r.n - 1)^2, 1 / r.n,
+                        r.l2_uniform, r.l2_adapted, g.l2_adapted,
+                        r.energy_uniform, r.energy_adapted, g.energy_adapted)
+            end
+        end
+    end
+
+    conv = plot(; layout = (2, 3), size = (940, 520), legend = false)
+    for (col, (_, title, _, tmop, gcee)) in enumerate(sweeps)
+        h = [1 / r.n for r in tmop]
+        blocks = (
+            ([r.l2_uniform for r in tmop], [r.l2_adapted for r in tmop],
+             [g.l2_adapted for g in gcee], 2, "L2 error"),
+            ([r.energy_uniform for r in tmop], [r.energy_adapted for r in tmop],
+             [g.energy_adapted for g in gcee], 1, "H1 seminorm"),
+        )
+        for (row, (yu, yt, yg, power, ylab)) in enumerate(blocks)
+            sp = (row - 1) * 3 + col
+            show = sp == 1
+            plot!(conv, h, yu; subplot = sp, marker = :circle, markersize = 3,
+                  color = C_UNIFORM, label = show ? "uniform" : "",
+                  xscale = :log10, yscale = :log10, xlabel = "h",
+                  ylabel = col == 1 ? ylab : "", title = row == 1 ? title : "")
+            plot!(conv, h, yt; subplot = sp, marker = :square, markersize = 3,
+                  color = C_TMOPU, label = show ? "TMOP target" : "")
+            plot!(conv, h, yg; subplot = sp, marker = :diamond, markersize = 3,
+                  color = C_GCEE, label = show ? "GCEE target" : "")
+            guide = yu[1] .* (h ./ h[1]) .^ power
+            plot!(conv, h, guide; subplot = sp, linestyle = :dot, color = :gray,
+                  label = show ? (power == 2 ? "O(h^2)" : "O(h)") : "")
+        end
+    end
+    plot!(conv; subplot = 1, legend = :topright)
+    savepair(joinpath(out, "shortlist_convergence"), conv)
+
+    ring(x, y) = ring_feature(x, y)
+    tid9(x, y) = ring_feature(x, y; r1 = 0.15, r2 = 0.35)
+    band = unit_square_mesh(ngeo; order = order)
+    band_size, metric_size = sinusoidal_target(band, band.xyz0; variant = :size)
+    band_shape, metric_shape = sinusoidal_target(band, band.xyz0; variant = :shape)
+    band_both, metric_both = sinusoidal_target(band, band.xyz0; variant = :both)
+    cases = [
+        ("ring-paper", target_pair(7, field_target(ring_size_target()), ring;
+                                    n = ngeo, iterations = iterations, order = order)),
+        ("ring-tid9", target_pair(7, field_target(ring_size_target(; r1 = 0.15, r2 = 0.35)), tid9;
+                                  n = ngeo, iterations = iterations, order = order)),
+        ("ring-tid10", target_pair(9, field_target(ring_aspect_target()), ring;
+                                   n = ngeo, iterations = iterations, order = order)),
+        ("band-size", target_pair(metric_size, band_size, sinusoidal_eta;
+                                  n = ngeo, iterations = iterations, order = order)),
+        ("band-shape", target_pair(metric_shape, band_shape, sinusoidal_eta;
+                                   n = ngeo, iterations = iterations, order = order)),
+        ("band-both", target_pair(metric_both, band_both, sinusoidal_eta;
+                                  n = ngeo, iterations = iterations, order = order)),
+        ("material", target_pair(7, field_target(material_interface_target(band, band.xyz0)),
+                                 material_feature; n = ngeo, iterations = iterations, order = order)),
+        ("discrete-size", target_pair(94, field_target(discrete_size_target(band, band.xyz0)),
+                                      size_feature; n = ngeo, iterations = iterations, order = order)),
+    ]
+    byname = Dict(name => pair for (name, pair) in cases)
+
+    shock = target_pair(107, field_target(orientation_target(ngeo)),
+                        (x, y) -> oblique_shock(x, y; slope = 20.0);
+                        n = ngeo, iterations = iterations, order = order)
+    left, right = metric_pair_plot(shock, "TMOP", "GCEE")
+    savepair(joinpath(out, "shortlist_shock_metric"),
+             plot(left, right; layout = (1, 2), size = (920, 460)))
+
+    r9 = metric_pair_plot(byname["ring-tid9"], "tid 9 TMOP", "tid 9 GCEE")
+    r10 = metric_pair_plot(byname["ring-tid10"], "tid 10 TMOP", "tid 10 GCEE")
+    savepair(joinpath(out, "shortlist_ring_metric"),
+             plot(r9..., r10...; layout = (2, 2), size = (920, 860)))
+
+    iface = metric_pair_plot(byname["material"], "interface TMOP", "interface GCEE")
+    disc = metric_pair_plot(byname["discrete-size"], "discrete size TMOP", "discrete size GCEE")
+    savepair(joinpath(out, "shortlist_indicators_metric"),
+             plot(iface..., disc...; layout = (2, 2), size = (920, 860)))
+
+    area0 = 1 / ngeo^2
+    qlines = [raw"\begin{tabular}{llcrrrrrr}", raw"\toprule",
+              raw"& & & \multicolumn{2}{c}{$\min_K |K|\ (\times 10^{-3})$}" *
+              raw" & \multicolumn{2}{c}{$|K_{\mathrm{unif}}|/\min_K|K|$}" *
+              raw" & \multicolumn{2}{c}{$\max_K \mu$}" * "\\\\",
+              raw"\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}",
+              raw"Target & $\mu$ & ratio & TMOP & GCEE & TMOP & GCEE & TMOP & GCEE" * "\\\\",
+              raw"\midrule"]
+    open(joinpath(DATA, "cases_gcee.csv"), "w") do io
+        println(io, "case,metric,F0_TMOP,F1_TMOP,F0_GCEE,F1_GCEE,min_area_TMOP,min_area_GCEE,max_mu_TMOP,max_mu_GCEE")
+        for (key, label, ratio) in QUALITY_ROWS
+            pair = byname[key]
+            mt, mg = maximum(pair.mu_t), maximum(pair.mu_g)
+            println(io, join((key, pair.metric, pair.f0t, pair.f1t, pair.f0g, pair.f1g,
+                              pair.area_t, pair.area_g, mt, mg), ","))
+            push!(qlines, @sprintf("%s & \$\\mu_{%d}\$ & %s & %.2f & %.2f & %.1f & %.1f & %s & %s\\\\",
+                                   label, pair.metric, ratio, 1e3 * pair.area_t, 1e3 * pair.area_g,
+                                   area0 / pair.area_t, area0 / pair.area_g, fmt_mu(mt), fmt_mu(mg)))
+        end
+    end
+    append!(qlines, [raw"\bottomrule", raw"\end{tabular}"])
+    write(joinpath(out, "shortlist_quality.tex"), join(qlines, "\n") * "\n")
+    return nothing
+end
 
 # ---------------------------------------------------------------------------
 
@@ -147,6 +409,20 @@ function main()
         end
     end
     savepair(joinpath(out, "recovery_effectivity"), conv)
+
+    families = (
+        ("regular", 0.0, "regular"),
+        ("checkerboard", 0.4, "alternating"),
+        ("random", 0.25, "random"),
+        ("curved_A", 0.3, "curved A"),
+        ("curved_B", 0.3, "curved B"),
+        ("curved_C", 0.5, "curved C"),
+    )
+    outlines = [family_outline(structured_mesh(6; kind = "Q8", family = f,
+                                              amplitude = a, seed = 7); title = title)
+                for (f, a, title) in families]
+    savepair(joinpath(out, "recovery_meshes"),
+             plot(outlines...; layout = (2, 3), size = (980, 640)))
 
     # --- Experiments 4-5 ----------------------------------------------------
     println("relocation study ...")
@@ -300,16 +576,26 @@ function main()
 
     u = manufactured("beam")
     lims = ((-0.05, 2.05), (-0.05, 2.05))
-    function beam_panel(points, title)
-        nodal = [u(points[i, 1], points[i, 2]) for i in axes(points, 1)]
-        return mesh_field(points, partcells, nodal; title = title, lims = lims,
-                          cmap = :viridis)
-    end
-    savepair(joinpath(out, "part_meshes"), plot(
-        beam_panel(partmesh["gcee"][1], "initial"),
-        beam_panel(partmesh["gcee"][end], "GCEE, four cycles"),
-        beam_panel(partmesh["tmop"][end], "geometric, four cycles");
-        layout = (1, 3), size = (1120, 380)))
+    # The field panel is the exact annulus, fine enough that the cells disappear
+    # and the colour is the manufactured feature that drives the relocation.
+    fieldmesh = curved_beam(40; kind = "Q4", amplitude = 0.0)
+    meshes = (
+        fieldmesh.points,
+        partmesh["gcee"][1],
+        partmesh["tmop"][end],
+        partmesh["gcee"][end],
+    )
+    conns = (fieldmesh.cells, partcells, partcells, partcells)
+    titles = ("manufactured field", "initial", "TMOP", "GCEE")
+    nodal = [[u(pts[i, 1], pts[i, 2]) for i in axes(pts, 1)] for pts in meshes]
+    painted = [cell_means(conn, val) for (conn, val) in zip(conns, nodal)]
+    vmin, vmax = minimum(minimum.(painted)), maximum(maximum.(painted))
+    panels = [mesh_field(pts, conn, val; title = field_heading(title, paint), lims = lims,
+                         cmap = :YlOrRd, vmin = vmin, vmax = vmax,
+                         linewidth = pts === fieldmesh.points ? 0.0 : 0.35)
+              for (pts, conn, val, paint, title) in zip(meshes, conns, nodal, painted, titles)]
+    savepair(joinpath(out, "part_meshes"),
+             plot(panels...; layout = (2, 2), size = (920, 860)))
 
     hist = plot(; layout = (1, 2), size = (900, 320))
     for mode in ("gcee", "tmop")
@@ -340,6 +626,11 @@ function main()
                 r["gcee_recovered"], r["gcee_oracle"], r["zz"],
                 r["residual_estimator"], r["det_min"], r["det_ratio"])
         end
+    end
+    if quick
+        export_shortlist(out; levels = (4, 8), ngeo = 6, iterations = 3, order = 2)
+    else
+        export_shortlist(out)
     end
     println("wrote tables and figures to ", out)
 end
